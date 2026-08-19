@@ -1,0 +1,30 @@
+name: Deploy
+
+# Responde directo a la lección más repetida en el proyecto de Arsenal
+# Digital: "el build de Vercel quedó bien pero la base no se sincronizó"
+# porque prisma db push/migrate deploy era un paso manual aparte. Acá se
+# automatiza — el deploy no se considera terminado sin este paso.
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Aplicar migraciones pendientes
+        run: pnpm --filter @erp/core prisma migrate deploy
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DIRECT_URL: ${{ secrets.DIRECT_URL }}
+      # Vercel hace el build/deploy del código por su integración de Git
+      # nativa. Este job corre en paralelo o justo antes — el punto es que
+      # ya no depende de que alguien se acuerde de correrlo a mano.

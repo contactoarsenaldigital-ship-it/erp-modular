@@ -1,0 +1,16 @@
+:root {
+  --brand-primary: #185fa5;
+  --brand-secondary: #0f6e56;
+  --brand-accent: #d85a30;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #f7f7f5;
+  color: #222;
+}

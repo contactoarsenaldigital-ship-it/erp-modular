@@ -1,0 +1,190 @@
+// Schema del núcleo (Fase 0). Cuando se construya cada módulo de negocio
+// (Fases 1-4) sus tablas se agregan como bloques nuevos en este mismo
+// datasource, todas con organizationId — nunca asumido "porque el resto
+// del proyecto sigue ese patrón" (lección de My Clipper Supply): cada
+// relación de acá abajo documenta explícitamente cómo llega a Organization.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  // La URL de conexión ya no va acá desde Prisma 7 — vive en
+  // prisma.config.ts (raíz de este package). El CLI (db push / migrate)
+  // usa DIRECT_URL (Session pooler, 5432); el cliente en runtime usa
+  // DATABASE_URL (Transaction pooler, 6543) vía un driver adapter en
+  // src/prisma-client.ts. Mismo motivo de siempre: migrar con el pooler
+  // equivocado se cuelga en silencio sin error claro.
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy
+// ---------------------------------------------------------------------------
+
+model Organization {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  modules      OrganizationModule[]
+  connections  ModuleConnection[]
+  branding     OrganizationBranding?
+  members      UserOrganization[]
+  eventLogs    EventLog[]
+
+  @@map("organizations")
+}
+
+// Perfil espejo del usuario de Supabase Auth (auth.users.id). No guarda
+// contraseña ni sesión acá — eso lo resuelve Supabase Auth directamente,
+// a diferencia del AUTH_SECRET casero de los dos proyectos anteriores.
+model UserProfile {
+  id        String   @id
+  email     String   @unique
+  fullName  String?
+  createdAt DateTime @default(now())
+
+  organizations UserOrganization[]
+
+  @@map("user_profiles")
+}
+
+model UserOrganization {
+  id             String   @id @default(uuid())
+  userId         String
+  organizationId String
+  role           String   @default("member") // owner | admin | member
+  createdAt      DateTime @default(now())
+
+  // onDelete: si se borra el usuario o la organización, esta fila
+  // (la membresía) deja de tener sentido -> Cascade es correcto acá.
+  user         UserProfile @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  modulePermissions ModulePermission[]
+
+  @@unique([userId, organizationId])
+  @@map("user_organizations")
+}
+
+// Permiso fino por módulo. moduleKey se valida en la capa de aplicación
+// contra MODULE_KEYS de @erp/contracts — nunca se agrega un módulo nuevo
+// tocando esta tabla directamente.
+model ModulePermission {
+  id                 String  @id @default(uuid())
+  userOrganizationId String
+  moduleKey          String
+  canWrite           Boolean @default(true)
+
+  // onDelete Cascade: el permiso solo existe en función de la membresía.
+  userOrganization UserOrganization @relation(fields: [userOrganizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userOrganizationId, moduleKey])
+  @@map("module_permissions")
+}
+
+// ---------------------------------------------------------------------------
+// Licenciamiento de módulos (modelo comercial: precio único + soporte mensual)
+// ---------------------------------------------------------------------------
+
+model OrganizationModule {
+  id                  String   @id @default(uuid())
+  organizationId      String
+  moduleKey           String
+  status              String   @default("active") // active | read_only | cancelled
+  purchasedAt         DateTime @default(now())
+  oneTimePrice        Decimal  @db.Decimal(12, 2)
+  monthlySupportPrice Decimal  @db.Decimal(12, 2)
+  supportStatus       String   @default("al_dia") // al_dia | atrasado
+  billingCycleAnchor  Int // día del mes en que se cobra el soporte (1-28)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  // onDelete Cascade: la licencia no tiene sentido sin la organización.
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, moduleKey])
+  @@index([organizationId, status])
+  @@map("organization_modules")
+}
+
+// Matriz de interconexión — la que se prende/apaga desde Admin.
+// moduleA/moduleB son strings (ModuleKey), no relaciones, porque no hay
+// una tabla "Module" en base de datos: los módulos son código, no datos.
+model ModuleConnection {
+  id             String   @id @default(uuid())
+  organizationId String
+  moduleA        String
+  moduleB        String
+  enabled        Boolean  @default(false)
+  config         Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, moduleA, moduleB])
+  @@map("module_connections")
+}
+
+model OrganizationBranding {
+  organizationId String   @id
+  logoUrl        String?
+  faviconUrl     String?
+  colorPrimary   String   @default("#185FA5")
+  colorSecondary String   @default("#0F6E56")
+  colorAccent    String   @default("#D85A30")
+  colorText      String?
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("organization_branding")
+}
+
+// ---------------------------------------------------------------------------
+// Bus de eventos — patrón outbox (decisión cerrada: persistencia + reintentos
+// desde la Fase 0, no un emisor simple provisorio)
+// ---------------------------------------------------------------------------
+
+model EventLog {
+  id            String    @id @default(uuid())
+  organizationId String
+  eventType     String // StockAdjusted | SaleConfirmed | PurchaseReceived | ...
+  payload       Json
+  emittedAt     DateTime  @default(now())
+  status        String    @default("pending") // pending | delivered | failed
+  attempts      Int       @default(0)
+  lastAttemptAt DateTime?
+  lastError     String?
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  deliveries   EventDelivery[]
+
+  @@index([organizationId, status])
+  @@index([status, emittedAt])
+  @@map("event_log")
+}
+
+// Una fila por (evento, módulo suscriptor) — permite que un evento se
+// entregue a varios módulos de forma independiente: si Contabilidad falla
+// al procesar un StockAdjusted, Ventas no se ve afectado ni se reintenta
+// de más.
+model EventDelivery {
+  id                  String    @id @default(uuid())
+  eventLogId          String
+  subscriberModuleKey String
+  status              String    @default("pending") // pending | delivered | failed
+  attempts            Int       @default(0)
+  lastAttemptAt       DateTime?
+  lastError           String?
+
+  // onDelete Cascade: la entrega no existe sin el evento que la originó.
+  eventLog EventLog @relation(fields: [eventLogId], references: [id], onDelete: Cascade)
+
+  @@unique([eventLogId, subscriberModuleKey])
+  @@map("event_deliveries")
+}

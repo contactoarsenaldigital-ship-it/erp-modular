@@ -92,15 +92,22 @@ resuelve en cada request a partir del usuario autenticado (ver
 - [ ] UI de conexión entre módulos (`ModuleConnection`) — tiene más
       sentido construirla en Fase 2, cuando haya dos módulos reales que
       conectar (ver nota en `app/(admin)/admin/settings/page.tsx`).
-- [ ] Pipeline de CI/CD que corra `prisma migrate deploy` automáticamente
+- [x] Pipeline de CI/CD que corra `prisma migrate deploy` automáticamente
       después de cada push a `main` — responde directo a la lección más
       repetida en el proyecto de Arsenal Digital ("el build de Vercel
-      quedó bien pero la base no se sincronizó"). El workflow YA existe
-      (`.github/workflows/deploy.yml`) pero queda sin marcar hasta
-      confirmar que corrió una vez con éxito: necesita los secrets
-      `DATABASE_URL` y `DIRECT_URL` configurados en GitHub (Settings →
-      Secrets and variables → Actions) — sin eso, el job falla en
-      silencio la primera vez que alguien haga push a `main`.
+      quedó bien pero la base no se sincronizó"). Confirmado corriendo
+      con éxito en `.github/workflows/deploy.yml` (secrets `DATABASE_URL`
+      y `DIRECT_URL` configurados en GitHub → Settings → Secrets and
+      variables → Actions). Requirió además "baselinear" la base
+      existente — ver `packages/core/prisma/migrations/0_init/`, la
+      primera migración real del proyecto, generada a partir del schema
+      ya aplicado con `db push` y marcada como aplicada con
+      `prisma migrate resolve --applied` (sin esto, `migrate deploy`
+      falla con `P3005` contra una base que ya tiene tablas pero cero
+      migraciones registradas). Cualquier módulo nuevo (Fases 1-4) que
+      cambie el schema debe generar su propia migración con
+      `prisma migrate dev` de ahí en adelante — no volver a usar
+      `db push` contra esta base.
 
 ## Convención de storage (a definir en Fase 1)
 
